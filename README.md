@@ -11,11 +11,11 @@ A production-ready Kubernetes platform on AWS EKS demonstrating end-to-end platf
 ## 🎬 Platform Demo
 
 ### ArgoCD App of Apps
-![ArgoCD Demo](./demos/argocd-demo.gif)
+![Image](https://github.com/user-attachments/assets/5b665663-3e38-4a9c-8121-8f1a57c870fb)
 *GitOps dashboard showing hierarchical application management with platform, observability, and application layers*
 
 ### Grafana Observability
-![Grafana Demo](./demos/grafana-demo.gif)
+![Image](https://github.com/user-attachments/assets/67eb8841-4f38-4e44-8d2e-f92d5985a2b3)
 *Real-time cluster metrics, node resources, and pod health monitoring*
 
 ## ✨ What's New in Version 2
@@ -427,6 +427,7 @@ Infrastructure split into bootstrap (state + OIDC), networking (VPC), ECR (regis
 
 
 **AI-Portal Repo**: [https://github.com/Jtwoolbright/ai-infrastructure-self-service-portal]
+**Version 1 Repo**: [https://github.com/Jtwoolbright/terraform-eks-argocd-platform]
 
 
 📫 **Let's Connect:** [Blog](https://medium.com/@woolbright.josh.t) [LinkedIn](https://linkedin.com/in/josh-woolbright)
