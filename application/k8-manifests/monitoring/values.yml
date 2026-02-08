@@ -1,0 +1,127 @@
+###############################################################################
+# kube-prometheus-stack Configuration
+# 
+# Deployed via ArgoCD GitOps workflow
+# Components: Grafana, Prometheus, Node Exporter, Kube State Metrics
+# 
+# Docs: https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack
+###############################################################################
+
+kubelet:
+  enabled: true
+  namespace: kube-system
+  
+  serviceMonitor:
+    cAdvisor: true
+    probes: true
+    resource: true
+    resourcePath: "/metrics/resource"
+    cAdvisorMetricRelabelings:
+      - sourceLabels: [__name__]
+        regex: 'container_cpu_usage_seconds_total|container_memory_working_set_bytes|container_network_receive_bytes_total|container_network_transmit_bytes_total'
+        action: keep
+    
+    https: true
+    
+    metricRelabelings:
+      - sourceLabels: [__name__]
+        action: keep
+        regex: 'kubelet_.*|node_.*|container_.*'
+
+###############################################################################
+# Grafana - Metrics Visualization & Dashboards
+###############################################################################
+grafana:
+  enabled: true
+
+  admin:
+    existingSecret: grafana-admin-secret
+    passwordKey: admin-password
+    userKey: admin-user  
+
+  grafana.ini:
+    server:
+      root_url: "%(protocol)s://%(domain)s/grafana"
+      serve_from_sub_path: true
+  
+  ingress:
+    enabled: true
+    ingressClassName: alb
+    annotations:
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/group.name: shared-alb
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+      alb.ingress.kubernetes.io/certificate-arn: <your-certificate-arn>
+      alb.ingress.kubernetes.io/healthcheck-path: /api/health
+      alb.ingress.kubernetes.io/tags: Environment=production,ManagedBy=ArgoCD,Component=Grafana
+
+    path: /grafana
+    pathType: Prefix
+    hosts: []
+  
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+  
+  # Enable this in production to persist custom dashboards
+  persistence:
+    enabled: false
+
+###############################################################################
+# Prometheus - Time Series Database & Metrics Collection
+###############################################################################
+prometheus:
+  enabled: true
+  
+  prometheusSpec:
+    retention: 7d
+    
+    resources:
+      requests:
+        cpu: 100m
+        memory: 512Mi
+      limits:
+        cpu: 500m
+        memory: 1Gi
+    
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: gp2
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 10Gi
+
+###############################################################################
+# Metrics Exporters - Data Collection Agents
+###############################################################################
+
+kubeStateMetrics:
+  enabled: true
+
+nodeExporter:
+  enabled: true
+
+###############################################################################
+# Prometheus Operator - Manages Prometheus CRDs
+###############################################################################
+prometheusOperator:
+  enabled: true
+
+###############################################################################
+# AlertManager - Alert Routing & Notifications (Currently Disabled)
+###############################################################################
+alertmanager:
+  enabled: false
+
+###############################################################################
+# Default Alerting Rules 
+###############################################################################
+defaultRules:
+  create: true

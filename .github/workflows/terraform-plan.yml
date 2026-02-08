@@ -1,0 +1,225 @@
+name: 'Terraform Plan'
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  id-token: write
+  contents: read
+  issues: write
+  pull-requests: write
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  TF_VERSION: 1.14.3 
+
+jobs:
+  parse-command:
+    name: 'Parse Command'
+    runs-on: ubuntu-latest
+    if: github.event.issue.pull_request && startsWith(github.event.comment.body, '/plan')
+    outputs:
+      layer: ${{ steps.parse.outputs.layer }}
+      should_run: ${{ steps.parse.outputs.should_run }}
+    
+    steps:
+
+      - name: Parse Command
+        id: parse
+        run: |
+          COMMENT="${{ github.event.comment.body }}"
+          
+          if [[ $COMMENT =~ ^/plan[[:space:]]+(networking|ecr|eks|all)$ ]]; then
+            echo "layer=${BASH_REMATCH[1]}" >> $GITHUB_OUTPUT
+            echo "should_run=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_run=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: React to comment
+        if: steps.parse.outputs.should_run == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: context.payload.comment.id,
+              content: 'rocket'
+            });
+
+  plan-networking:
+    name: 'Plan Networking'
+    runs-on: ubuntu-latest
+    needs: parse-command
+    if: needs.parse-command.outputs.should_run == 'true' && (needs.parse-command.outputs.layer == 'networking' || needs.parse-command.outputs.layer == 'all')
+    
+    steps:
+      - name: Get PR details
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            return pr.data.head.ref;
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ fromJson(steps.pr.outputs.result) }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ AWS_ACCOUNT_ID }}:role/github-actions-terraform-role
+          aws-region: ${{ AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: ./networking
+        run: |
+          terraform init
+          terraform plan -no-color 2>&1 | tee plan.txt
+
+      - name: Comment Result
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('networking/plan.txt', 'utf8');
+            const truncated = plan.length > 60000 ? plan.substring(0, 60000) + '\n... [truncated]' : plan;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `### Terraform Networking Plan 🌐\n\n<details><summary>Show Plan</summary>\n\n\`\`\`terraform\n${truncated}\n\`\`\`\n\n</details>`
+            });
+
+  plan-eks:
+    name: 'Plan EKS'
+    runs-on: ubuntu-latest
+    needs: parse-command
+    if: needs.parse-command.outputs.should_run == 'true' && (needs.parse-command.outputs.layer == 'eks' || needs.parse-command.outputs.layer == 'all')
+    
+    steps:
+      - name: Get PR details
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            return pr.data.head.ref;
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ fromJson(steps.pr.outputs.result) }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ AWS_ACCOUNT_ID }}:role/github-actions-terraform-role
+          aws-region: ${{ AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: ./eks
+        run: |
+          terraform init
+          terraform plan -no-color 2>&1 | tee plan.txt
+
+      - name: Comment Result
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('eks/plan.txt', 'utf8');
+            const truncated = plan.length > 60000 ? plan.substring(0, 60000) + '\n... [truncated]' : plan;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `### Terraform EKS Plan 🚀\n\n<details><summary>Show Plan</summary>\n\n\`\`\`terraform\n${truncated}\n\`\`\`\n\n</details>`
+            });
+
+  plan-ecr:
+    name: 'Plan ECR'
+    runs-on: ubuntu-latest
+    needs: parse-command
+    if: needs.parse-command.outputs.should_run == 'true' && (needs.parse-command.outputs.layer == 'ecr' || needs.parse-command.outputs.layer == 'all')
+    
+    steps:
+      - name: Get PR details
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            return pr.data.head.ref;
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ fromJson(steps.pr.outputs.result) }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ AWS_ACCOUNT_ID }}:role/github-actions-terraform-role
+          aws-region: ${{ AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: ./ecr
+        run: |
+          terraform init
+          terraform plan -no-color 2>&1 | tee plan.txt
+
+      - name: Comment Result
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('ecr/plan.txt', 'utf8');
+            const truncated = plan.length > 60000 ? plan.substring(0, 60000) + '\n... [truncated]' : plan;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `### Terraform ECR Plan 🚀\n\n<details><summary>Show Plan</summary>\n\n\`\`\`terraform\n${truncated}\n\`\`\`\n\n</details>`
+            });

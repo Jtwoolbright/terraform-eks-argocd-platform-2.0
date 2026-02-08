@@ -1,0 +1,43 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring-app
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  
+  sources:
+    - repoURL: https://prometheus-community.github.io/helm-charts
+      chart: kube-prometheus-stack
+      targetRevision: "80.x"
+      helm:
+        valueFiles:
+          - $values/application/k8-manifests/monitoring/values.yml
+    
+    - repoURL: https://github.com/Jtwoolbright/terraform-eks-argocd-platform-2.0
+      targetRevision: main
+      ref: values
+      
+    - repoURL: https://github.com/Jtwoolbright/terraform-eks-argocd-platform-2.0
+      targetRevision: main
+      path: application/k8-manifests/monitoring/manifests
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

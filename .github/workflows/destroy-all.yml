@@ -1,0 +1,253 @@
+name: 'Destroy All'
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  id-token: write
+  contents: read
+  issues: write
+  pull-requests: write
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  TF_VERSION: 1.14.3
+
+jobs:
+  parse-command:
+    name: 'Parse Command'
+    runs-on: ubuntu-latest
+    if: github.event.issue.pull_request && startsWith(github.event.comment.body, '/destroy')
+    outputs:
+      layer: ${{ steps.parse.outputs.layer }}
+      should_run: ${{ steps.parse.outputs.should_run }}
+      confirmed: ${{ steps.parse.outputs.confirmed }}
+    
+    steps:
+      - name: Parse Command
+        id: parse
+        run: |
+          COMMENT="${{ github.event.comment.body }}"
+          
+          if [[ $COMMENT =~ ^/destroy[[:space:]]+(all)[[:space:]]+--confirm$ ]]; then
+            echo "layer=${BASH_REMATCH[1]}" >> $GITHUB_OUTPUT
+            echo "should_run=true" >> $GITHUB_OUTPUT
+            echo "confirmed=true" >> $GITHUB_OUTPUT
+          elif [[ $COMMENT =~ ^/destroy[[:space:]]+(all)$ ]]; then
+            LAYER="${BASH_REMATCH[1]}"
+            echo "layer=${LAYER}" >> $GITHUB_OUTPUT
+            echo "should_run=false" >> $GITHUB_OUTPUT
+            echo "confirmed=false" >> $GITHUB_OUTPUT
+          else
+            echo "should_run=false" >> $GITHUB_OUTPUT
+            echo "confirmed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Request confirmation
+        if: steps.parse.outputs.confirmed == 'false' && steps.parse.outputs.layer != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const layer = '${{ steps.parse.outputs.layer }}';
+            let resources = '';
+            
+            if (layer === 'networking' || layer === 'all') {
+              resources += '- VPC, Subnets, NAT Gateways, Internet Gateway\n';
+            }
+            if (layer === 'eks' || layer === 'all') {
+              resources += '- EKS Cluster and all Node Groups\n';
+            }
+            if (layer === 'all') {
+              resources += '- ALL infrastructure in both layers\n';
+            }
+            
+            const message = `### ⚠️ Destroy Confirmation Required
+
+            You're about to destroy the **${layer}** infrastructure layer.
+
+            **This action is IRREVERSIBLE and will delete:**
+            ${resources}
+
+            To proceed, comment:
+            \`\`\`
+            /destroy ${layer} --confirm
+            \`\`\`
+
+            To cancel, just ignore this message.`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: message
+            });
+
+      - name: React to confirmed command
+        if: steps.parse.outputs.confirmed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: context.payload.comment.id,
+              content: 'eyes'
+            });
+
+  cleanup-eks:
+    name: 'Kubernetes Cleanup'
+    runs-on: ubuntu-latest
+    needs: parse-command
+    if: needs.parse-command.outputs.confirmed == 'true' && needs.parse-command.outputs.layer == 'all'
+    
+    steps:
+      - name: Get PR details
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            return pr.data.head.ref;
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ fromJson(steps.pr.outputs.result) }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ AWS_ACCOUNT_ID }}:role/github-actions-terraform-role
+          aws-region: ${{ AWS_REGION }}
+
+      - name: Destroy Kubernetes  Internals
+        working-directory: ./application/scripts
+        run: | 
+          chmod +x ./argo-cleanup.sh 
+          ./argo-cleanup.sh
+
+  destroy-eks:
+    name: 'Destroy EKS'
+    runs-on: ubuntu-latest
+    needs: ['parse-command', 'cleanup-eks']
+    if: needs.parse-command.outputs.confirmed == 'true' && needs.parse-command.outputs.layer == 'all'
+    
+    steps:
+      - name: Get PR details
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            return pr.data.head.ref;
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ fromJson(steps.pr.outputs.result) }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ AWS_ACCOUNT_ID }}:role/github-actions-terraform-role
+          aws-region: ${{ AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Destroy
+        id: destroy
+        working-directory: ./eks
+        run: |
+          terraform init
+          terraform destroy -auto-approve -no-color 2>&1 | tee destroy.txt
+
+      - name: Comment Result
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const destroy = fs.readFileSync('eks/destroy.txt', 'utf8');
+            const truncated = destroy.length > 60000 ? destroy.substring(0, 60000) + '\n... [truncated]' : destroy;
+            const status = '${{ steps.destroy.outcome }}' === 'success' ? '✅ Destroyed Successfully' : '❌ Destroy Failed';
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `### Terraform EKS Destroy 🚀\n\n**Status:** ${status}\n\n<details><summary>Show Output</summary>\n\n\`\`\`terraform\n${truncated}\n\`\`\`\n\n</details>`
+            });
+
+  destroy-networking:
+    name: 'Destroy Networking'
+    runs-on: ubuntu-latest
+    needs: [parse-command, destroy-eks]
+    if: always() && needs.parse-command.outputs.confirmed == 'true' && needs.parse-command.outputs.layer == 'all' &&  needs.destroy-eks.result == 'success'
+    
+    steps:
+      - name: Get PR details
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            return pr.data.head.ref;
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ fromJson(steps.pr.outputs.result) }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ AWS_ACCOUNT_ID }}:role/github-actions-terraform-role
+          aws-region: ${{ AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Destroy
+        id: destroy
+        working-directory: ./networking
+        run: |
+          terraform init
+          terraform destroy -auto-approve -no-color 2>&1 | tee destroy.txt
+
+      - name: Comment Result
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const destroy = fs.readFileSync('networking/destroy.txt', 'utf8');
+            const truncated = destroy.length > 60000 ? destroy.substring(0, 60000) + '\n... [truncated]' : destroy;
+            const status = '${{ steps.destroy.outcome }}' === 'success' ? '✅ Destroyed Successfully' : '❌ Destroy Failed';
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `### Terraform Networking Destroy 🌐\n\n**Status:** ${status}\n\n<details><summary>Show Output</summary>\n\n\`\`\`terraform\n${truncated}\n\`\`\`\n\n</details>`
+            });

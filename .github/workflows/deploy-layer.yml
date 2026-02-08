@@ -1,0 +1,168 @@
+name: 'Deploy Layer'
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  id-token: write
+  contents: read
+  issues: write
+  pull-requests: write
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  TF_VERSION: 1.14.3
+
+jobs:
+  parse-command:
+    name: 'Parse Command'
+    runs-on: ubuntu-latest
+    if: github.event.issue.pull_request && startsWith(github.event.comment.body, '/deploy')
+    outputs:
+      layer: ${{ steps.parse.outputs.layer }}
+      should_run: ${{ steps.parse.outputs.should_run }}
+    
+    steps:
+      - name: Parse Command
+        id: parse
+        run: |
+          COMMENT="${{ github.event.comment.body }}"
+          
+          if [[ $COMMENT =~ ^/deploy[[:space:]]+(networking|ecr|eks|argo)$ ]]; then
+            echo "layer=${BASH_REMATCH[1]}" >> $GITHUB_OUTPUT
+            echo "should_run=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_run=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: React to comment
+        if: steps.parse.outputs.should_run == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: context.payload.comment.id,
+              content: 'rocket'
+            });
+
+  apply-terraform:
+    name: 'Apply Terraform'
+    runs-on: ubuntu-latest
+    needs: parse-command
+    if: needs.parse-command.outputs.should_run == 'true' && needs.parse-command.outputs.layer != 'argo'
+
+    steps:
+      - name: Get PR details
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            return pr.data.head.ref;
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ fromJson(steps.pr.outputs.result) }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ AWS_ACCOUNT_ID }}:role/github-actions-terraform-role
+          aws-region: ${{ AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Apply
+        id: apply
+        working-directory: ./${{ needs.parse-command.outputs.layer }}
+        run: |
+          terraform init
+          terraform apply -auto-approve -no-color 2>&1 | tee apply.txt
+
+      - name: Comment Result
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const apply = fs.readFileSync('${{ needs.parse-command.outputs.layer }}/apply.txt', 'utf8');
+            const truncated = apply.length > 60000 ? apply.substring(0, 60000) + '\n... [truncated]' : apply;
+            const status = '${{ steps.apply.outcome }}' === 'success' ? '✅ Applied Successfully' : '❌ Apply Failed';
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `### Terraform Apply 🌐\n\n**Status:** ${status}\n\n<details><summary>Show Output</summary>\n\n\`\`\`terraform\n${truncated}\n\`\`\`\n\n</details>`
+            });
+
+  install-argocd: 
+    name: 'Install ArgoCD'
+    runs-on: ubuntu-latest 
+    needs: parse-command 
+    if: needs.parse-command.outputs.should_run == 'true' && needs.parse-command.outputs.layer == 'argo'
+    steps: 
+      - name: Get PR details
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            return pr.data.head.ref;
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ fromJson(steps.pr.outputs.result) }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ AWS_ACCOUNT_ID }}:role/github-actions-terraform-role
+          aws-region: ${{ AWS_REGION }}
+
+      - name: Update kubeconfig 
+        run: |
+          cluster_name=$(aws ssm get-parameter --name /eks_project/cluster_name --query 'Parameter.Value' --output text)
+          aws eks update-kubeconfig --region ${{ AWS_REGION }} --name $cluster_name
+      
+      - name: Install Load Balancer Controller
+        working-directory: ./application/scripts
+        run: | 
+          chmod +x ./install-lb-controller.sh 
+          ./install-lb-controller.sh 
+      
+      - name: Install Argo CD 
+        working-directory: ./application/scripts
+        run: | 
+          chmod +x ./install-argocd.sh 
+          ./install-argocd.sh
+
+      - name: Expose Argo CD 
+        working-directory: ./application/scripts
+        run: | 
+          chmod +x ./expose-argocd.sh 
+          ./expose-argocd.sh
+
+      - name: Put Argo Pass
+        working-directory: ./application/scripts
+        run: | 
+          chmod +x ./put-argo-password.sh 
+          ./put-argo-password.sh
