@@ -239,11 +239,9 @@ A production-ready Kubernetes platform on AWS EKS demonstrating end-to-end platf
    - Update backend configuration in networking, ecr, eks, and application layers
    - Reference the S3 bucket from bootstrap outputs
 
-3. **Set GitHub Secrets**
+3. **Set GitHub Variables**
    - AWS account ID
-   - OIDC role ARN (from bootstrap outputs)
-   - Application repository credentials (for ai-portal integration)
-   - Any required environment variables
+   - Account Region
 
 4. **Prepare SSM Parameters**
    - Create SecureString parameters for applications that will use External Secrets Operator
@@ -427,6 +425,7 @@ Infrastructure split into bootstrap (state + OIDC), networking (VPC), ECR (regis
 
 
 **AI-Portal Repo**: [https://github.com/Jtwoolbright/ai-infrastructure-self-service-portal]
+
 **Version 1 Repo**: [https://github.com/Jtwoolbright/terraform-eks-argocd-platform]
 
 
